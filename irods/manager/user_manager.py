@@ -1,4 +1,6 @@
 from __future__ import absolute_import
+import logging
+
 from irods.models import User, UserGroup
 from irods.manager import Manager
 from irods.message import GeneralAdminRequest, iRODSMessage
@@ -6,8 +8,6 @@ from irods.exception import UserDoesNotExist, UserGroupDoesNotExist, NoResultFou
 from irods.api_number import api_number
 from irods.user import iRODSUser, iRODSUserGroup
 import irods.password_obfuscation as obf
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class UserGroupManager(UserManager):
 
     def getmembers(self, name):
         results = self.sess.query(User).filter(
-            User.type != 'rodsgroup', UserGroup.name == name).get_results()
+            User.type != 'rodsgroup', UserGroup.name == name)
         return [iRODSUser(self, row) for row in results]
 
     def addmember(self, group_name, user_name, user_zone=""):

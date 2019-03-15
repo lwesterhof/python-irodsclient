@@ -28,13 +28,12 @@ class iRODSCollection(object):
     def subcollections(self):
         query = self.manager.sess.query(Collection)\
             .filter(Collection.parent_name == self.path)
-        results = query.get_results()
-        return [iRODSCollection(self.manager, row) for row in results]
+        return [iRODSCollection(self.manager, row) for row in query]
 
     @property
     def data_objects(self):
         query = self.manager.sess.query(DataObject)\
-            .filter(DataObject.collection_id == self.id)
+            .filter(Collection.name == self.path)
         results = query.get_results()
         grouped = itertools.groupby(
             results, operator.itemgetter(DataObject.id))
@@ -44,10 +43,11 @@ class iRODSCollection(object):
             for _, replicas in grouped
         ]
 
-    def remove(self, recurse=True, force=False, additional_flags=None):
-        if additional_flags is None:
-            additional_flags = {}
-        self.manager.remove(self.path, recurse, force, additional_flags)
+    def remove(self, recurse=True, force=False, **options):
+        self.manager.remove(self.path, recurse, force, **options)
+
+    def unregister(self, **options):
+        self.manager.unregister(self.path, **options)
 
     def move(self, path):
         self.manager.move(self.path, path)

@@ -26,15 +26,6 @@ query_number = {'ORDER_BY': 0x400,
                 'SELECT_AVG': 5,
                 'SELECT_COUNT': 6}
 
-# Not present in iRODS 3.3.1 and older
-new_icat_keys = ['D_RESC_HIER',
-                 'R_FREE_SPACE_TIME',
-                 'R_RESC_STATUS',
-                 'R_RESC_CHILDREN',
-                 'R_RESC_CONTEXT',
-                 'R_RESC_PARENT',
-                 'R_RESC_OBJCOUNT']
-
 
 class Query(object):
 
@@ -49,7 +40,8 @@ class Query(object):
         for arg in args:
             if isinstance(arg, type) and issubclass(arg, Model):
                 for col in arg._columns:
-                    self.columns[col] = 1
+                    if self.sess.server_version >= col.min_version:
+                        self.columns[col] = 1
             elif isinstance(arg, Column):
                 self.columns[arg] = 1
             else:
@@ -161,20 +153,8 @@ class Query(object):
         }
         return GenQueryRequest(**args)
 
-    def _strip(self):
-        '''For backward compatibility with pre iRODS 4 versions.
-        '''
-        for column in list(self.columns):
-            if column.icat_key in new_icat_keys:
-                del self.columns[column]
-
     def execute(self):
         with self.sess.pool.get_connection() as conn:
-            # check server version
-            server_version = tuple(int(token)
-                                   for token in conn.server_version.replace('rods', '').split('.'))
-            if server_version < (4, 0, 0):
-                self._strip()
 
             message_body = self._message()
             message = iRODSMessage(
@@ -218,6 +198,9 @@ class Query(object):
         for result_set in self.get_batches():
             for result in result_set:
                 yield result
+
+    def __iter__(self):
+        return self.get_results()
 
     def one(self):
         results = self.execute()
@@ -296,7 +279,7 @@ class SpecificQuery(object):
             conditions = StringStringMap({})
 
         sql_args = {}
-        for i, arg in enumerate(self._args[:10]):
+        for i, arg in enumerate(self._args[:10], start=1):
             sql_args['arg{}'.format(i)] = arg
 
         message_body = SpecificQueryRequest(sql=target,
@@ -315,6 +298,10 @@ class SpecificQuery(object):
 
         results = response.get_main_message(GenQueryResponse)
         return SpecificQueryResultSet(results, self._columns)
+
+
+    def __iter__(self):
+        return self.get_results()
 
 
     def get_batches(self):

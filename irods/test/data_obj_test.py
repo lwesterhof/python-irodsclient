@@ -10,33 +10,30 @@ import random
 import string
 import unittest
 from irods.models import Collection, DataObject
+from irods.session import iRODSSession
 import irods.exception as ex
 from irods.column import Criterion
 from irods.data_object import chunks
-import irods.test.config as config
 import irods.test.helpers as helpers
 import irods.keywords as kw
+from datetime import datetime
 
 class TestDataObjOps(unittest.TestCase):
 
     def setUp(self):
-        self.sess = helpers.make_session_from_config()
-
-        # get server version
-        with self.sess.pool.get_connection() as conn:
-            self.server_version = tuple(int(token)
-                                        for token in conn.server_version.replace('rods', '').split('.'))
+        self.sess = helpers.make_session()
 
         # Create test collection
-        self.coll_path = '/{0}/home/{1}/test_dir'.format(
-            config.IRODS_SERVER_ZONE, config.IRODS_USER_USERNAME)
+        self.coll_path = '/{}/home/{}/test_dir'.format(self.sess.zone, self.sess.username)
         self.coll = helpers.make_collection(self.sess, self.coll_path)
+
 
     def tearDown(self):
         '''Remove test data and close connections
         '''
         self.coll.remove(recurse=True, force=True)
         self.sess.cleanup()
+
 
     def make_new_server_config_json(self, server_config_filename):
         # load server_config.json to inject a new rule base
@@ -50,6 +47,7 @@ class TestDataObjOps(unittest.TestCase):
         # dump to a string to repave the existing server_config.json
         return json.dumps(svr_cfg, sort_keys=True, indent=4, separators=(',', ': '))
 
+
     def sha256_checksum(self, filename, block_size=65536):
         sha256 = hashlib.sha256()
         with open(filename, 'rb') as f:
@@ -57,17 +55,20 @@ class TestDataObjOps(unittest.TestCase):
                 sha256.update(chunk)
         return sha256.hexdigest()
 
+
     def test_obj_exists(self):
         obj_name = 'this_object_will_exist_once_made'
         exists_path = '{}/{}'.format(self.coll_path, obj_name)
         helpers.make_object(self.sess, exists_path)
         self.assertTrue(self.sess.data_objects.exists(exists_path))
 
+
     def test_obj_does_not_exist(self):
         does_not_exist_name = 'this_object_will_never_exist'
         does_not_exist_path = '{}/{}'.format(self.coll_path,
                                              does_not_exist_name)
         self.assertFalse(self.sess.data_objects.exists(does_not_exist_path))
+
 
     def test_rename_obj(self):
         # test args
@@ -100,6 +101,7 @@ class TestDataObjOps(unittest.TestCase):
         # remove object
         self.sess.data_objects.unlink(new_path)
 
+
     def test_move_obj_to_coll(self):
         # test args
         collection = self.coll_path
@@ -129,6 +131,7 @@ class TestDataObjOps(unittest.TestCase):
         # remove new collection
         new_coll.remove(recurse=True, force=True)
 
+
     def test_copy_obj_to_obj(self):
         # test args
         collection = self.coll_path
@@ -136,17 +139,19 @@ class TestDataObjOps(unittest.TestCase):
         dest_file_name = 'bar'
 
         # make object in test collection
+        options={kw.REG_CHKSUM_KW: ''}
         src_path = "{collection}/{src_file_name}".format(**locals())
-        src_obj = helpers.make_object(self.sess, src_path, options={kw.REG_CHKSUM_KW: ''})
+        src_obj = helpers.make_object(self.sess, src_path, **options)
 
         # copy object
         options = {kw.VERIFY_CHKSUM_KW: ''}
         dest_path = "{collection}/{dest_file_name}".format(**locals())
-        self.sess.data_objects.copy(src_path, dest_path, options)
+        self.sess.data_objects.copy(src_path, dest_path, **options)
 
         # compare checksums
         dest_obj = self.sess.data_objects.get(dest_path)
         self.assertEqual(src_obj.checksum, dest_obj.checksum)
+
 
     def test_copy_obj_to_coll(self):
         # test args
@@ -159,16 +164,18 @@ class TestDataObjOps(unittest.TestCase):
 
         # make object in test collection
         path = "{collection}/{file_name}".format(**locals())
-        src_obj = helpers.make_object(self.sess, path, options={kw.REG_CHKSUM_KW: ''})
+        options={kw.REG_CHKSUM_KW: ''}
+        src_obj = helpers.make_object(self.sess, path, **options)
 
         # make new collection and copy object into it
         options = {kw.VERIFY_CHKSUM_KW: ''}
         helpers.make_collection(self.sess, dest_coll_path)
-        self.sess.data_objects.copy(path, dest_coll_path, options)
+        self.sess.data_objects.copy(path, dest_coll_path, **options)
 
         # compare checksums
         dest_obj = self.sess.data_objects.get(dest_obj_path)
         self.assertEqual(src_obj.checksum, dest_obj.checksum)
+
 
     def test_invalid_get(self):
         # bad paths
@@ -180,6 +187,7 @@ class TestDataObjOps(unittest.TestCase):
 
         with self.assertRaises(ex.CollectionDoesNotExist):
             obj = self.sess.data_objects.get(path_with_invalid_coll)
+
 
     def test_force_unlink(self):
         collection = self.coll_path
@@ -204,6 +212,7 @@ class TestDataObjOps(unittest.TestCase):
         results = query.all()
         self.assertEqual(len(results), 0)
 
+
     def test_obj_truncate(self):
         collection = self.coll_path
         filename = 'test_obj_truncate.txt'
@@ -223,6 +232,7 @@ class TestDataObjOps(unittest.TestCase):
         with obj.open('r') as f:
             self.assertEqual(f.read().decode(), truncated_content)
 
+
     def test_multiple_reads(self):
         collection = self.coll_path
 
@@ -239,12 +249,14 @@ class TestDataObjOps(unittest.TestCase):
             with obj.open('r') as f:
                 self.assertEqual(f.read().decode(), obj.path)
 
-    @unittest.skipIf(
-        config.IRODS_SERVER_HOST != 'localhost' and config.IRODS_SERVER_HOST != socket.gethostname(
-        ), "Cannot modify remote server configuration")
+
     def test_create_with_checksum(self):
+        # skip if server is remote
+        if self.sess.host not in ('localhost', socket.gethostname()):
+            self.skipTest('Requires access to server-side file(s)')
+
         # skip if server is older than 4.2
-        if self.server_version < (4, 2, 0):
+        if self.sess.server_version < (4, 2, 0):
             self.skipTest('Expects iRODS 4.2 server-side configuration')
 
         # server config
@@ -284,7 +296,7 @@ class TestDataObjOps(unittest.TestCase):
 
                 # make object in test collection
                 options = {kw.OPR_TYPE_KW: 1}   # PUT_OPR
-                obj = helpers.make_object(self.sess, obj_path, content=contents, options=options)
+                obj = helpers.make_object(self.sess, obj_path, content=contents, **options)
 
                 # verify object's checksum
                 self.assertEqual(
@@ -302,12 +314,13 @@ class TestDataObjOps(unittest.TestCase):
             raise
 
 
-    @unittest.skipIf(
-        config.IRODS_SERVER_HOST != 'localhost' and config.IRODS_SERVER_HOST != socket.gethostname(
-        ), "Cannot modify remote server configuration")
     def test_put_file_trigger_pep(self):
+        # skip if server is remote
+        if self.sess.host not in ('localhost', socket.gethostname()):
+            self.skipTest('Requires access to server-side file(s)')
+
         # skip if server is older than 4.2
-        if self.server_version < (4, 2, 0):
+        if self.sess.server_version < (4, 2, 0):
             self.skipTest('Expects iRODS 4.2 server-side configuration')
 
         # server config
@@ -378,7 +391,7 @@ class TestDataObjOps(unittest.TestCase):
         '''
 
         # skip if server is 4.1.4 or older
-        if self.server_version <= (4, 1, 4):
+        if self.sess.server_version <= (4, 1, 4):
             self.skipTest('Not supported')
 
         # test data
@@ -399,7 +412,7 @@ class TestDataObjOps(unittest.TestCase):
         options = {kw.REG_CHKSUM_KW: ''}
 
         # write contents of file to object
-        with open(file_path, 'rb') as f, objs.open(obj_path, 'w', options) as o:
+        with open(file_path, 'rb') as f, objs.open(obj_path, 'w', **options) as o:
             for chunk in chunks(f):
                 o.write(chunk)
 
@@ -415,13 +428,13 @@ class TestDataObjOps(unittest.TestCase):
     def test_obj_replicate(self):
         # test data
         resc_name = 'temporary_test_resource'
-        if config.IRODS_SERVER_VERSION < (4, 0, 0):
+        if self.sess.server_version < (4, 0, 0):
             resc_type = 'unix file system'
             resc_class = 'cache'
         else:
             resc_type = 'unixfilesystem'
             resc_class = ''
-        resc_host = config.IRODS_SERVER_HOST  # use remote host when available in CI
+        resc_host = self.sess.host  # use remote host when available in CI
         resc_path = '/tmp/' + resc_name
 
         # make second resource
@@ -452,8 +465,10 @@ class TestDataObjOps(unittest.TestCase):
         self.sess.resources.remove(resc_name)
 
 
-    @unittest.skipIf(config.IRODS_SERVER_VERSION < (4, 0, 0), "iRODS 4+")
     def test_replica_number(self):
+        if self.sess.server_version < (4, 0, 0):
+            self.skipTest('For iRODS 4+')
+
         session = self.sess
         zone = session.zone
         username = session.username
@@ -467,7 +482,7 @@ class TestDataObjOps(unittest.TestCase):
         # make ufs resources
         ufs_resources = []
         for i in range(number_of_replicas):
-            resource_name = 'ufs{0}'.format(i)
+            resource_name = 'ufs{}'.format(i)
             resource_type = 'unixfilesystem'
             resource_host = session.host
             resource_path = '/tmp/' + resource_name
@@ -477,12 +492,20 @@ class TestDataObjOps(unittest.TestCase):
             # add child to replication resource
             session.resources.add_child(replication_resource.name, resource_name)
 
-        # create object on replication resource
-        obj = session.data_objects.create(obj_path, replication_resource.name)
+        # make test object on replication resource
+        if self.sess.server_version > (4, 1, 4):
+            # skip create
+            options = {kw.DEST_RESC_NAME_KW: replication_resource.name}
+            with session.data_objects.open(obj_path, 'w', **options) as obj:
+                obj.write(obj_content)
 
-        # write to object
-        with obj.open('w+') as obj_desc:
-            obj_desc.write(obj_content)
+        else:
+            # create object on replication resource
+            obj = session.data_objects.create(obj_path, replication_resource.name)
+
+            # write to object
+            with obj.open('w') as obj_desc:
+                obj_desc.write(obj_content)
 
         # refresh object
         obj = session.data_objects.get(obj_path)
@@ -494,9 +517,8 @@ class TestDataObjOps(unittest.TestCase):
 
         # now trim odd-numbered replicas
         for i in [1, 3, 5]:
-            options = {}
-            options[kw.REPL_NUM_KW] = str(i)
-            obj.unlink(options=options)
+            options = {kw.REPL_NUM_KW: str(i)}
+            obj.unlink(**options)
 
         # refresh object
         obj = session.data_objects.get(obj_path)
@@ -519,10 +541,134 @@ class TestDataObjOps(unittest.TestCase):
         replication_resource.remove()
 
 
-    def test_obj_put_get(self):
+    def test_repave_replicas(self):
+        # Can't do one step open/create with older servers
+        if self.sess.server_version <= (4, 1, 4):
+            self.skipTest('For iRODS 4.1.5 and newer')
+
+        number_of_replicas = 7
+        session = self.sess
+        zone = session.zone
+        username = session.username
+        test_dir = '/tmp'
+        filename = 'repave_replica_test_file.txt'
+        test_file = os.path.join(test_dir, filename)
+        obj_path = '/{zone}/home/{username}/{filename}'.format(**locals())
+
+        # make test file
+        obj_content = u'foobar'
+        checksum = base64.b64encode(hashlib.sha256(obj_content.encode('utf-8')).digest()).decode()
+        with open(test_file, 'w') as f:
+            f.write(obj_content)
+
+        # put test file onto default resource
+        options = {kw.REG_CHKSUM_KW: ''}
+        session.data_objects.put(test_file, obj_path, **options)
+
+        # make ufs resources and replicate object
+        ufs_resources = []
+        for i in range(number_of_replicas):
+            resource_name = 'ufs{}'.format(i)
+            resource_type = 'unixfilesystem'
+            resource_host = session.host
+            resource_path = '/tmp/{}'.format(resource_name)
+            ufs_resources.append(session.resources.create(
+                resource_name, resource_type, resource_host, resource_path))
+
+            session.data_objects.replicate(obj_path, resource=resource_name)
+
+        # refresh object
+        obj = session.data_objects.get(obj_path)
+
+        # verify each replica's checksum
+        for replica in obj.replicas:
+            self.assertEqual(replica.checksum, 'sha2:{}'.format(checksum))
+
+        # now repave test file
+        obj_content = u'bar'
+        checksum = base64.b64encode(hashlib.sha256(obj_content.encode('utf-8')).digest()).decode()
+        with open(test_file, 'w') as f:
+            f.write(obj_content)
+
+        # update all replicas
+        options = {kw.REG_CHKSUM_KW: '', kw.ALL_KW: ''}
+        session.data_objects.put(test_file, obj_path, **options)
+        obj = session.data_objects.get(obj_path)
+
+        # verify each replica's checksum
+        for replica in obj.replicas:
+            self.assertEqual(replica.checksum, 'sha2:{}'.format(checksum))
+
+        # remove object
+        obj.unlink(force=True)
+
+        # remove ufs resources
+        for resource in ufs_resources:
+            resource.remove()
+
+    def test_get_replica_size(self):
+        session = self.sess
 
         # Can't do one step open/create with older servers
-        if self.server_version <= (4, 1, 4):
+        if session.server_version <= (4, 1, 4):
+            self.skipTest('For iRODS 4.1.5 and newer')
+
+        # test vars
+        test_dir = '/tmp'
+        filename = 'get_replica_size_test_file'
+        test_file = os.path.join(test_dir, filename)
+        collection = self.coll.path
+
+        # make random 16byte binary file
+        original_size = 16
+        with open(test_file, 'wb') as f:
+            f.write(os.urandom(original_size))
+
+        # make ufs resources
+        ufs_resources = []
+        for i in range(2):
+            resource_name = 'ufs{}'.format(i)
+            resource_type = 'unixfilesystem'
+            resource_host = session.host
+            resource_path = '/tmp/{}'.format(resource_name)
+            ufs_resources.append(session.resources.create(
+                resource_name, resource_type, resource_host, resource_path))
+
+        # put file in test collection and replicate
+        obj_path = '{collection}/{filename}'.format(**locals())
+        options = {kw.DEST_RESC_NAME_KW: ufs_resources[0].name}
+        session.data_objects.put(test_file, collection + '/', **options)
+        session.data_objects.replicate(obj_path, ufs_resources[1].name)
+
+        # make random 32byte binary file
+        new_size = 32 
+        with open(test_file, 'wb') as f:
+            f.write(os.urandom(new_size))
+
+        # overwrite existing replica 0 with new file
+        options = {kw.FORCE_FLAG_KW: '', kw.DEST_RESC_NAME_KW: ufs_resources[0].name}
+        session.data_objects.put(test_file, collection + '/', **options)
+
+        # delete file
+        os.remove(test_file)
+
+        # ensure that sizes of the replicas are distinct
+        obj = session.data_objects.get(obj_path, test_dir)
+        self.assertEqual(obj.replicas[0].size, new_size)
+        self.assertEqual(obj.replicas[1].size, original_size)
+
+        # remove object
+        obj.unlink(force=True)
+        # delete file
+        os.remove(test_file)
+
+        # remove ufs resources
+        for resource in ufs_resources:
+            resource.remove()
+
+    def test_obj_put_get(self):
+        # Can't do one step open/create with older servers
+        if self.sess.server_version <= (4, 1, 4):
             self.skipTest('For iRODS 4.1.5 and newer')
 
         # test vars
@@ -550,6 +696,337 @@ class TestDataObjOps(unittest.TestCase):
 
         # re-compute and verify checksum
         self.assertEqual(digest, self.sha256_checksum(test_file))
+
+        # delete file
+        os.remove(test_file)
+
+
+    def test_obj_create_to_default_resource(self):
+        if self.sess.server_version < (4, 0, 0):
+            self.skipTest('For iRODS 4+')
+
+        # make another UFS resource
+        session = self.sess
+        resource_name = 'ufs'
+        resource_type = 'unixfilesystem'
+        resource_host = session.host
+        resource_path = '/tmp/' + resource_name
+        session.resources.create(resource_name, resource_type, resource_host, resource_path)
+
+        # set default resource to new UFS resource
+        session.default_resource = resource_name
+
+        # test object
+        collection = self.coll_path
+        filename = 'create_def_resc_test_file'
+        obj_path = "{collection}/{filename}".format(**locals())
+        content = ''.join(random.choice(string.printable) for _ in range(1024))
+
+        # make object in test collection
+        obj = helpers.make_object(session, obj_path, content=content)
+
+        # get object and confirm resource
+        self.assertEqual(obj.replicas[0].resource_name, resource_name)
+
+        # delete obj and second resource
+        obj.unlink(force=True)
+        session.resources.remove(resource_name)
+
+
+    def test_obj_put_to_default_resource(self):
+        # Can't do one step open/create with older servers
+        if self.sess.server_version <= (4, 1, 4):
+            self.skipTest('For iRODS 4.1.5 and newer')
+
+        # make another UFS resource
+        session = self.sess
+        resource_name = 'ufs'
+        resource_type = 'unixfilesystem'
+        resource_host = session.host
+        resource_path = '/tmp/' + resource_name
+        session.resources.create(resource_name, resource_type, resource_host, resource_path)
+
+        # set default resource to new UFS resource
+        session.default_resource = resource_name
+
+        # make a local file with random text content
+        content = ''.join(random.choice(string.printable) for _ in range(1024))
+        filename = 'testfile.txt'
+        file_path = os.path.join('/tmp', filename)
+        with open(file_path, 'w') as f:
+            f.write(content)
+
+        # put file
+        collection = self.coll_path
+        obj_path = '{collection}/{filename}'.format(**locals())
+
+        session.data_objects.put(file_path, obj_path)
+
+        # get object and confirm resource
+        obj = session.data_objects.get(obj_path)
+        self.assertEqual(obj.replicas[0].resource_name, resource_name)
+
+        # cleanup
+        os.remove(file_path)
+        obj.unlink(force=True)
+        session.resources.remove(resource_name)
+
+
+    def test_obj_put_to_default_resource_from_env_file(self):
+        # Can't do one step open/create with older servers
+        if self.sess.server_version <= (4, 1, 4):
+            self.skipTest('For iRODS 4.1.5 and newer')
+
+        # make another UFS resource
+        session = self.sess
+        resource_name = 'ufs'
+        resource_type = 'unixfilesystem'
+        resource_host = session.host
+        resource_path = '/tmp/' + resource_name
+        session.resources.create(resource_name, resource_type, resource_host, resource_path)
+
+        # make a copy of the irods env file with 'ufs0' as the default resource
+        env_file = os.path.expanduser('~/.irods/irods_environment.json')
+        new_env_file = '/tmp/irods_environment.json'
+
+        with open(env_file) as f, open(new_env_file, 'w') as new_f:
+            irods_env = json.load(f)
+            irods_env['irods_default_resource'] = resource_name
+            json.dump(irods_env, new_f)
+
+        # now open a new session with our modified environment file
+        with helpers.make_session(irods_env_file=new_env_file) as new_session:
+
+            # make a local file with random text content
+            content = ''.join(random.choice(string.printable) for _ in range(1024))
+            filename = 'testfile.txt'
+            file_path = os.path.join('/tmp', filename)
+            with open(file_path, 'w') as f:
+                f.write(content)
+
+            # put file
+            collection = self.coll_path
+            obj_path = '{collection}/{filename}'.format(**locals())
+
+            new_session.data_objects.put(file_path, obj_path)
+
+            # get object and confirm resource
+            obj = new_session.data_objects.get(obj_path)
+            self.assertEqual(obj.replicas[0].resource_name, resource_name)
+
+            # remove object
+            obj.unlink(force=True)
+
+        # delete second resource
+        session.resources.remove(resource_name)
+
+        # cleanup
+        os.remove(file_path)
+        os.remove(new_env_file)
+
+
+    def test_obj_put_and_return_data_object(self):
+        # Can't do one step open/create with older servers
+        if self.sess.server_version <= (4, 1, 4):
+            self.skipTest('For iRODS 4.1.5 and newer')
+
+        # make another UFS resource
+        session = self.sess
+        resource_name = 'ufs'
+        resource_type = 'unixfilesystem'
+        resource_host = session.host
+        resource_path = '/tmp/' + resource_name
+        session.resources.create(resource_name, resource_type, resource_host, resource_path)
+
+        # set default resource to new UFS resource
+        session.default_resource = resource_name
+
+        # make a local file with random text content
+        content = ''.join(random.choice(string.printable) for _ in range(1024))
+        filename = 'testfile.txt'
+        file_path = os.path.join('/tmp', filename)
+        with open(file_path, 'w') as f:
+            f.write(content)
+
+        # put file
+        collection = self.coll_path
+        obj_path = '{collection}/{filename}'.format(**locals())
+
+        new_file = session.data_objects.put(file_path, obj_path, return_data_object=True)
+
+        # get object and confirm resource
+        obj = session.data_objects.get(obj_path)
+        self.assertEqual(new_file.replicas[0].resource_name, obj.replicas[0].resource_name)
+
+        # cleanup
+        os.remove(file_path)
+        obj.unlink(force=True)
+        session.resources.remove(resource_name)
+
+
+
+    def test_force_get(self):
+        # Can't do one step open/create with older servers
+        if self.sess.server_version <= (4, 1, 4):
+            self.skipTest('For iRODS 4.1.5 and newer')
+
+        # test vars
+        test_dir = '/tmp'
+        filename = 'force_get_test_file'
+        test_file = os.path.join(test_dir, filename)
+        collection = self.coll.path
+
+        # make random 4M binary file
+        with open(test_file, 'wb') as f:
+            f.write(os.urandom(1024 * 1024 * 4))
+
+        # put file in test collection
+        self.sess.data_objects.put(test_file, collection + '/')
+
+        # try to get file back
+        obj_path = '{collection}/{filename}'.format(**locals())
+        with self.assertRaises(ex.OVERWRITE_WITHOUT_FORCE_FLAG):
+            self.sess.data_objects.get(obj_path, test_dir)
+
+        # this time with force flag
+        options = {kw.FORCE_FLAG_KW: ''}
+        self.sess.data_objects.get(obj_path, test_dir, **options)
+
+        # delete file
+        os.remove(test_file)
+
+
+    def test_register(self):
+        # skip if server is remote
+        if self.sess.host not in ('localhost', socket.gethostname()):
+            self.skipTest('Requires access to server-side file(s)')
+
+        # test vars
+        test_dir = '/tmp'
+        filename = 'register_test_file'
+        test_file = os.path.join(test_dir, filename)
+        collection = self.coll.path
+        obj_path = '{collection}/{filename}'.format(**locals())
+
+        # make random 4K binary file
+        with open(test_file, 'wb') as f:
+            f.write(os.urandom(1024 * 4))
+
+        # register file in test collection
+        self.sess.data_objects.register(test_file, obj_path)
+
+        # confirm object presence
+        obj = self.sess.data_objects.get(obj_path)
+
+        # in a real use case we would likely
+        # want to leave the physical file on disk
+        obj.unregister()
+
+        # delete file
+        os.remove(test_file)
+
+
+    def test_register_with_checksum(self):
+        # skip if server is remote
+        if self.sess.host not in ('localhost', socket.gethostname()):
+            self.skipTest('Requires access to server-side file(s)')
+
+        # test vars
+        test_dir = '/tmp'
+        filename = 'register_test_file'
+        test_file = os.path.join(test_dir, filename)
+        collection = self.coll.path
+        obj_path = '{collection}/{filename}'.format(**locals())
+
+        # make random 4K binary file
+        with open(test_file, 'wb') as f:
+            f.write(os.urandom(1024 * 4))
+
+        # register file in test collection
+        options = {kw.VERIFY_CHKSUM_KW: ''}
+        self.sess.data_objects.register(test_file, obj_path, **options)
+
+        # confirm object presence and verify checksum
+        obj = self.sess.data_objects.get(obj_path)
+
+        # don't use obj.path (aka logical path)
+        phys_path = obj.replicas[0].path
+        digest = helpers.compute_sha256_digest(phys_path)
+        self.assertEqual(obj.checksum, "sha2:{}".format(digest))
+
+        # leave physical file on disk
+        obj.unregister()
+
+        # delete file
+        os.remove(test_file)
+
+    def test_modDataObjMeta(self):
+        # skip if server is remote
+        if self.sess.host not in ('localhost', socket.gethostname()):
+            self.skipTest('Requires access to server-side file(s)')
+
+        # test vars
+        test_dir = '/tmp'
+        filename = 'register_test_file'
+        test_file = os.path.join(test_dir, filename)
+        collection = self.coll.path
+        obj_path = '{collection}/{filename}'.format(**locals())
+
+        # make random 4K binary file
+        with open(test_file, 'wb') as f:
+            f.write(os.urandom(1024 * 4))
+
+        # register file in test collection
+        self.sess.data_objects.register(test_file, obj_path)
+
+        qu = self.sess.query(Collection.id).filter(Collection.name == collection)
+        for res in qu:
+            collection_id = res[Collection.id]
+
+        qu = self.sess.query(DataObject.size, DataObject.modify_time).filter(DataObject.name == filename, DataObject.collection_id == collection_id)
+        for res in qu:
+            self.assertEqual(int(res[DataObject.size]), 1024 * 4)
+        self.sess.data_objects.modDataObjMeta({"objPath" : obj_path}, {"dataSize":1024, "dataModify":4096})
+
+        qu = self.sess.query(DataObject.size, DataObject.modify_time).filter(DataObject.name == filename, DataObject.collection_id == collection_id)
+        for res in qu:
+            self.assertEqual(int(res[DataObject.size]), 1024)
+            self.assertEqual(res[DataObject.modify_time], datetime.utcfromtimestamp(4096))
+
+        # leave physical file on disk
+        self.sess.data_objects.unregister(obj_path)
+
+        # delete file
+        os.remove(test_file)
+
+    def test_register_with_xml_special_chars(self):
+        # skip if server is remote
+        if self.sess.host not in ('localhost', socket.gethostname()):
+            self.skipTest('Requires access to server-side file(s)')
+
+        # test vars
+        test_dir = '/tmp'
+        filename = '''aaa'"<&test&>"'_file'''
+        test_file = os.path.join(test_dir, filename)
+        collection = self.coll.path
+        obj_path = '{collection}/{filename}'.format(**locals())
+
+        # make random 4K binary file
+        with open(test_file, 'wb') as f:
+            f.write(os.urandom(1024 * 4))
+
+        # register file in test collection
+        print('registering [' + obj_path + ']')
+        self.sess.data_objects.register(test_file, obj_path)
+
+        # confirm object presence
+        print('getting [' + obj_path + ']')
+        obj = self.sess.data_objects.get(obj_path)
+
+        # in a real use case we would likely
+        # want to leave the physical file on disk
+        print('unregistering [' + obj.path + ']')
+        obj.unregister()
 
         # delete file
         os.remove(test_file)

@@ -8,7 +8,6 @@ import textwrap
 import unittest
 from irods.models import DataObject
 import irods.test.helpers as helpers
-import irods.test.config as config
 from irods.rule import Rule
 import six
 
@@ -19,12 +18,7 @@ class TestRule(unittest.TestCase):
     '''
 
     def setUp(self):
-        self.sess = helpers.make_session_from_config()
-
-        # get server version
-        with self.sess.pool.get_connection() as conn:
-            self.server_version = tuple(int(token)
-                                        for token in conn.server_version.replace('rods', '').split('.'))
+        self.sess = helpers.make_session()
 
     def tearDown(self):
         # close connections
@@ -140,7 +134,7 @@ class TestRule(unittest.TestCase):
         '''
 
         # Wrong buffer length on older versions
-        if self.server_version < (4, 1, 7):
+        if self.sess.server_version < (4, 1, 7):
             self.skipTest('For iRODS 4.1.7 and newer')
 
         session = self.sess

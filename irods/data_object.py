@@ -1,11 +1,14 @@
 from __future__ import absolute_import
 import io
 import sys
+import logging
+import six
 
 from irods.models import DataObject
 from irods.meta import iRODSMetaCollection
 import irods.keywords as kw
-import six
+
+logger = logging.getLogger(__name__)
 
 
 def chunks(f, chunksize=io.DEFAULT_BUFFER_SIZE):
@@ -20,14 +23,17 @@ def irods_basename(path):
 
 class iRODSReplica(object):
 
-    def __init__(self, number, status, resource_name, path):
+    def __init__(self, number, status, resource_name, path, **kwargs):
         self.number = number
         self.status = status
         self.resource_name = resource_name
         self.path = path
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
 
     def __repr__(self):
-        return "<{0}.{1} {2}>".format(
+        return "<{}.{} {}>".format(
             self.__class__.__module__,
             self.__class__.__name__,
             self.resource_name
@@ -45,8 +51,8 @@ class iRODSDataObject(object):
                     try:
                         setattr(self, attr, results[0][value])
                     except KeyError:
-                        # backward compatibility with pre iRODS 4
-                        sys.exc_clear()
+                        # backward compatibility with older schema versions
+                        pass
             self.path = self.collection.path + '/' + self.name
             replicas = sorted(
                 results, key=lambda r: r[DataObject.replica_number])
@@ -54,12 +60,14 @@ class iRODSDataObject(object):
                 r[DataObject.replica_number],
                 r[DataObject.replica_status],
                 r[DataObject.resource_name],
-                r[DataObject.path]
+                r[DataObject.path],
+                checksum=r[DataObject.checksum],
+                size=r[DataObject.size]
             ) for r in replicas]
         self._meta = None
 
     def __repr__(self):
-        return "<iRODSDataObject {id} {name}>".format(id=self.id, name=self.name.encode('utf-8'))
+        return "<iRODSDataObject {id} {name}>".format(**vars(self))
 
     @property
     def metadata(self):
@@ -68,31 +76,36 @@ class iRODSDataObject(object):
                 self.manager.sess.metadata, DataObject, self.path)
         return self._meta
 
-    def open(self, mode='r', options=None):
-        return self.manager.open(self.path, mode, options)
+    def open(self, mode='r', **options):
+        if kw.DEST_RESC_NAME_KW not in options:
+            options[kw.DEST_RESC_NAME_KW] = self.replicas[0].resource_name
 
-    def unlink(self, force=False, options=None):
-        self.manager.unlink(self.path, force, options)
+        return self.manager.open(self.path, mode, **options)
+
+    def unlink(self, force=False, **options):
+        self.manager.unlink(self.path, force, **options)
+
+    def unregister(self, **options):
+        self.manager.unregister(self.path, **options)
 
     def truncate(self, size):
         self.manager.truncate(self.path, size)
 
-    def replicate(self, resource):
-        options = {}
+    def replicate(self, resource=None, **options):
         if resource:
             options[kw.DEST_RESC_NAME_KW] = resource
-        self.manager.replicate(self.path, options)
+        self.manager.replicate(self.path, **options)
 
 
 class iRODSDataObjectFileRaw(io.RawIOBase):
 
-    def __init__(self, conn, descriptor, options):
+    def __init__(self, conn, descriptor, **options):
         self.conn = conn
         self.desc = descriptor
         self.options = options
 
     def close(self):
-        self.conn.close_file(self.desc, self.options)
+        self.conn.close_file(self.desc, **self.options)
         self.conn.release()
         super(iRODSDataObjectFileRaw, self).close()
         return None
@@ -101,11 +114,10 @@ class iRODSDataObjectFileRaw(io.RawIOBase):
         return self.conn.seek_file(self.desc, offset, whence)
 
     def readinto(self, b):
-        contents = self.conn.read_file(self.desc, len(b))
+        contents = self.conn.read_file(self.desc, buffer=b)
         if contents is None:
             return 0
-        for i, c in enumerate(contents):
-            b[i] = c
+
         return len(contents)
 
     def write(self, b):

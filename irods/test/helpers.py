@@ -1,32 +1,37 @@
 from __future__ import absolute_import
 import os
+import io
 import tempfile
 import contextlib
 import shutil
-import irods.test.config as config
+import hashlib
+import base64
+import math
+from pwd import getpwnam
 from irods.session import iRODSSession
 from irods.message import iRODSMessage
 from six.moves import range
 
 
-def make_session_from_config(**kwargs):
-    conf_map = {'host': 'IRODS_SERVER_HOST',
-                'port': 'IRODS_SERVER_PORT',
-                'zone': 'IRODS_SERVER_ZONE',
-                'user': 'IRODS_USER_USERNAME',
-                'authentication_scheme': 'IRODS_AUTHENTICATION_SCHEME',
-                'password': 'IRODS_USER_PASSWORD',
-                'server_dn': 'IRODS_SERVER_DN'}
-    for key in conf_map.keys():
+def make_session(**kwargs):
+    try:
+        env_file = kwargs['irods_env_file']
+    except KeyError:
         try:
-            kwargs[key] = vars(config)[conf_map[key]]
+            env_file = os.environ['IRODS_ENVIRONMENT_FILE']
         except KeyError:
-            pass
+            env_file = os.path.expanduser('~/.irods/irods_environment.json')
 
-    return iRODSSession(**kwargs)
+    try:
+        os.environ['IRODS_CI_TEST_RUN']
+        uid = getpwnam('irods').pw_uid
+    except KeyError:
+        uid = None
+
+    return iRODSSession(irods_authentication_uid=uid, irods_env_file=env_file)
 
 
-def make_object(session, path, content=None, options=None):
+def make_object(session, path, content=None, **options):
     if content is None:
         content = u'blah'
 
@@ -34,7 +39,7 @@ def make_object(session, path, content=None, options=None):
 
     # 2 step open-create necessary for iRODS 4.1.4 or older
     obj = session.data_objects.create(path)
-    with obj.open('w', options) as obj_desc:
+    with obj.open('w', **options) as obj_desc:
         obj_desc.write(content)
 
     # refresh object after write
@@ -87,6 +92,36 @@ def make_deep_collection(session, root_path, depth=10, objects_per_level=50, obj
             current_coll_path, 'subcoll' + str(d).zfill(len(str(d))))
 
     return root_coll
+
+
+def make_flat_test_dir(dir_path, file_count=10, file_size=1024):
+    if file_count < 1:
+        raise ValueError
+
+    os.mkdir(dir_path)
+
+    for i in range(file_count):
+        # pad file name suffix with zeroes
+        suffix_width = int(math.log10(file_count))+1
+        file_path = '{dir_path}/test_{i:0>{suffix_width}}.txt'.format(**locals())
+
+        # make random binary file
+        with open(file_path, 'wb') as f:
+            f.write(os.urandom(file_size))
+
+
+def chunks(f, chunksize=io.DEFAULT_BUFFER_SIZE):
+    return iter(lambda: f.read(chunksize), b'')
+
+
+def compute_sha256_digest(file_path):
+    hasher = hashlib.sha256()
+
+    with open(file_path, 'rb') as f:
+        for chunk in chunks(f):
+            hasher.update(chunk)
+
+    return base64.b64encode(hasher.digest()).decode()
 
 
 @contextlib.contextmanager

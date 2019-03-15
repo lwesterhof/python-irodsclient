@@ -1,6 +1,91 @@
 Changelog
 =========
 
+v0.8.1 (2018-09-27)
+-------------------
+- [#140] Remove randomization from password test [Alan King]
+- [#139] Use uppercase queries in tests [Alan King]
+- [#137] Handle filenames with ampersands [Alan King]
+- [#126] Add size attribute to iRODSReplica [Alan King]
+
+v0.8.0 (2018-05-03)
+-------------------
+- Add rescName and replNum awareness. [Hao Xu]
+- Document put() method in README.rst. [Terrell Russell]
+- Add support for specifying resource hierarchy. [Hao Xu]
+- Add modDataObjMeta. [Hao Xu]
+- Use socket.recv_into() to speed up file download. [Pierre Gay]
+- Lazy load resource children. [Antoine de Torcy]
+- Test cleanup. [Antoine de Torcy]
+- Add recursive collection creation support, plus test. [Robert Davey]
+- Make query instances iterable. [Antoine de Torcy]
+- Update package information. [Antoine de Torcy]
+- Add version attribute to icat columns. [Antoine de Torcy]
+- Don't enforce DB schema in data object constructor. [Antoine de Torcy]
+- Add D_RESC_ID to data object model. [Bob Belnap]
+- SSL context from iRODSAccount instance attributes. [Antoine de Torcy]
+- Avoid calling data object create on replication node. [Antoine de Torcy]
+- Pass optional CA file to SSL context. [Antoine de Torcy]
+- Graceful SSL shutdown. [Antoine de Torcy]
+- Set open flags and IO buffer size in DataObjectManager. [Antoine de Torcy]
+- Force open flags to client os independent values. [Pierre Gay]
+- Handle Winerror 10045. [Pierre Gay]
+- Python 2/3 compability. [Jonathan de Bruin]
+
+
+v0.7.0 (2017-12-15)
+-------------------
+- Dynamic instance method definition for Python2/3. [Antoine de Torcy]
+- Filter by collection path. [Antoine de Torcy]
+- Add truncate flag. [Antoine de Torcy]
+- Add update replica keyword. [Antoine de Torcy]
+- Client-side support for ALL_KW on put. [Antoine de Torcy]
+- Add server version to session properties. [Antoine de Torcy]
+- Pass object IO options in unpacked format. [Antoine de Torcy]
+- Refactor tests and session config. [Antoine de Torcy]
+- First pass at SSL support. [Antoine de Torcy]
+- Use reentrant lock in connection pool. [Antoine de Torcy]
+- Allow for cases with CS_NEG_DONT_CARE. [Antoine de Torcy]
+- First pass at client-server negotiation. [Antoine de Torcy]
+- Simplify session/account initialization. [Antoine de Torcy]
+- Expect multiple DNs per user. [Antoine de Torcy]
+- Use default resource host/path strings. [Antoine de Torcy]
+- Honor default resource setting. [Antoine de Torcy]
+- Add placeholder for formatting arguments. [Antoine de Torcy]
+- Add function get_html_string in results.py. [KERVELLEC Joseph]
+- Fix assertions. [Antoine de Torcy]
+- Test registration with checksum. [Antoine de Torcy]
+- Add admin option to AccessManager.set() [Antoine de Torcy]
+- Add file/dir registration. [Antoine de Torcy]
+- Remove call to sys.exc_clear() [Antoine de Torcy]
+- Force flag support on get. [Antoine de Torcy]
+- Fix intermittent encoding error. [Antoine de Torcy]
+- Update iRODSSession.configure() [Antoine de Torcy]
+- Set default iRODS authentication scheme to native. [Lazlo Westerhof]
+- Use the same naming as iRODS environment variable
+  irods_authentication_scheme. [Lazlo Westerhof]
+- Add connection timeout. [Antoine de Torcy]
+- Extend the query condition interface. [Antoine de Torcy]
+- Better handling of byte buffers. [Antoine de Torcy]
+- Python 3 fix. [Antoine de Torcy]
+- Set OPR_TYPE to 1 on put. [Antoine de Torcy]
+- Set default empty username in iRODSAccess. [Antoine de Torcy]
+- Add ability to set user passwords. [Antoine de Torcy]
+- First pass at iRODS ticket support - ticket generation - ticket based
+  access. [Antoine de Torcy]
+- Add dependencies to setup.py. [Antoine de Torcy]
+- Add object put/get test. [Antoine de Torcy]
+- Unpack error messages. [Antoine de Torcy]
+- Add CAT_UNKNOWN_SPECIFIC_QUERY exception. [Antoine de Torcy]
+- Commits for the english language, which apparently I'm qualified in..
+  [John Constable]
+- Document the use of the SpecificQuery class and irods_environment.json
+  reading functionality. [John Constable]
+- Adds exists() to data_object manager to mirror collection manager.
+  [Alex Lemann]
+- Remove unused exceptions. [Antoine de Torcy]
+- Fix exception hierarchy. [Antoine de Torcy]
+
 
 v0.6.0 (2017-05-23)
 -------------------

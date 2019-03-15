@@ -2,15 +2,14 @@ import struct
 import logging
 import socket
 import xml.etree.ElementTree as ET
-
-
-from irods import IRODS_VERSION
 from irods.message.message import Message
 from irods.message.property import (BinaryProperty, StringProperty,
                                     IntegerProperty, LongProperty, ArrayProperty,
                                     SubmessageProperty)
 
 logger = logging.getLogger(__name__)
+
+IRODS_VERSION = (4, 3, 0, 'd')
 
 try:
     # Python 2
@@ -26,7 +25,12 @@ def _recv_message_in_len(sock, size):
     while size_left > 0:
         try:
             buf = sock.recv(size_left, socket.MSG_WAITALL)
-        except AttributeError:
+        except (AttributeError, ValueError):
+            buf = sock.recv(size_left)
+        except OSError as e:
+            #skip only Windows error 10045 
+            if getattr(e, 'winerror', 0) != 10045:
+                raise
             buf = sock.recv(size_left)
         size_left -= len(buf)
         if retbuf is None:
@@ -34,6 +38,25 @@ def _recv_message_in_len(sock, size):
         else:
             retbuf += buf
     return retbuf
+
+
+def _recv_message_into(sock, buffer, size):
+    size_left = size
+    index = 0
+    mv = memoryview(buffer)
+    while size_left > 0:
+        try:
+            rsize = sock.recv_into(mv[index:], size_left, socket.MSG_WAITALL)
+        except (AttributeError, ValueError):
+            rsize = sock.recv_into(mv[index:], size_left)
+        except OSError as e:
+            #skip only Windows error 10045 
+            if getattr(e, 'winerror', 0) != 10045:
+                raise
+            rsize = sock.recv_into(mv[index:], size_left)
+        size_left -= rsize
+        index += rsize
+    return mv[:index]
 
 
 class iRODSMessage(object):
@@ -74,6 +97,25 @@ class iRODSMessage(object):
 
         return iRODSMessage(msg_type, message, error, bs, int_info)
 
+    @staticmethod
+    def recv_into(sock, buffer):
+        rsp_header_size = _recv_message_in_len(sock, 4)
+        rsp_header_size = struct.unpack(">i", rsp_header_size)[0]
+        rsp_header = _recv_message_in_len(sock, rsp_header_size)
+
+        xml_root = ET.fromstring(rsp_header)
+        msg_type = xml_root.find('type').text
+        msg_len = int(xml_root.find('msgLen').text)
+        err_len = int(xml_root.find('errorLen').text)
+        bs_len = int(xml_root.find('bsLen').text)
+        int_info = int(xml_root.find('intInfo').text)
+
+        message = _recv_message_in_len(sock, msg_len) if msg_len != 0 else None
+        error = _recv_message_in_len(sock, err_len) if err_len != 0 else None
+        bs = _recv_message_into(sock, buffer, bs_len) if bs_len != 0 else None
+
+        return iRODSMessage(msg_type, message, error, bs, int_info)
+
 
     @staticmethod
     def encode_unicode(my_str):
@@ -81,6 +123,25 @@ class iRODSMessage(object):
             return my_str.encode('utf-8')
         else:
             return my_str
+
+
+    @staticmethod
+    def pack_header(type, msg_len, err_len, bs_len, int_info):
+        msg_header = ("<MsgHeader_PI>"
+                      "<type>{}</type>"
+                      "<msgLen>{}</msgLen>"
+                      "<errorLen>{}</errorLen>"
+                      "<bsLen>{}</bsLen>"
+                      "<intInfo>{}</intInfo>"
+                      "</MsgHeader_PI>").format(type, msg_len, err_len, bs_len, int_info)
+
+        # encode if needed
+        msg_header = iRODSMessage.encode_unicode(msg_header)
+
+        # pack length
+        msg_header_length = struct.pack(">i", len(msg_header))
+
+        return msg_header_length + msg_header
 
 
     def pack(self):
@@ -94,25 +155,14 @@ class iRODSMessage(object):
         self.error = self.encode_unicode(self.error)
         self.bs = self.encode_unicode(self.bs)
 
-        header_info = {'type' : self.msg_type,
-                       'msg_len': len(main_msg),
-                       'err_len': len(self.error),
-                       'bs_len': len(self.bs),
-                       'int_info': self.int_info}
+        # pack header
+        packed_header = self.pack_header(self.msg_type,
+                                         len(main_msg),
+                                         len(self.error),
+                                         len(self.bs),
+                                         self.int_info)
 
-        msg_header = ("<MsgHeader_PI>"
-                      "<type>{type}</type>"
-                      "<msgLen>{msg_len}</msgLen>"
-                      "<errorLen>{err_len}</errorLen>"
-                      "<bsLen>{bs_len}</bsLen>"
-                      "<intInfo>{int_info}</intInfo>"
-                      "</MsgHeader_PI>").format(**header_info)
-
-        # encode message header if needed
-        msg_header = self.encode_unicode(msg_header)
-
-        msg_header_length = struct.pack(">i", len(msg_header))
-        return msg_header_length + msg_header + main_msg + self.error + self.bs
+        return packed_header + main_msg + self.error + self.bs
 
 
     def get_main_message(self, cls):
@@ -120,6 +170,14 @@ class iRODSMessage(object):
         logger.debug(self.msg)
         msg.unpack(ET.fromstring(self.msg))
         return msg
+
+
+#define CS_NEG_PI "int status; str result[MAX_NAME_LEN];"
+class ClientServerNegotiation(Message):
+    _name = 'CS_NEG_PI'
+    status = IntegerProperty()
+    result = StringProperty()
+
 
 # define StartupPack_PI "int irodsProt; int reconnFlag; int connectCnt;
 # str proxyUser[NAME_LEN]; str proxyRcatZone[NAME_LEN]; str
@@ -137,9 +195,8 @@ class StartupPack(Message):
             self.connectCnt = 0
             self.proxyUser, self.proxyRcatZone = proxy_user
             self.clientUser, self.clientRcatZone = client_user
-            self.relVersion = "rods{major}.{minor}.{patchlevel}".format(
-                **IRODS_VERSION)
-            self.apiVersion = "{api}".format(**IRODS_VERSION)
+            self.relVersion = "rods{}.{}.{}".format(*IRODS_VERSION)
+            self.apiVersion = "{3}".format(*IRODS_VERSION)
             self.option = ""
 
     irodsProt = IntegerProperty()
@@ -166,6 +223,12 @@ class AuthChallenge(Message):
     _name = 'authRequestOut_PI'
     challenge = BinaryProperty(64)
 
+
+class AuthPluginOut(Message):
+    _name = 'authPlugReqOut_PI'
+    result_ = StringProperty()
+    # result_ = BinaryProperty(16)
+
 # define InxIvalPair_PI "int iiLen; int *inx(iiLen); int *ivalue(iiLen);"
 
 
@@ -175,7 +238,7 @@ class BinBytesBuf(Message):
     buf = BinaryProperty()
 
 
-class GSIAuthMessage(Message):
+class PluginAuthMessage(Message):
     _name = 'authPlugReqInp_PI'
     auth_scheme_ = StringProperty()
     context_ = StringProperty()
@@ -554,6 +617,48 @@ class STR_PI(Message):
     _name = 'STR_PI'
     myStr = StringProperty()
 
+
+class DataObjInfo(Message):
+    _name = 'DataObjInfo_PI'
+    objPath = StringProperty()
+    rescName = StringProperty()
+    rescHier = StringProperty()
+    dataType = StringProperty()
+    dataSize = LongProperty()
+    chksum = StringProperty()
+    version = StringProperty()
+    filePath = StringProperty()
+    dataOwnerName = StringProperty()
+    dataOwnerZone = StringProperty()
+    replNum = IntegerProperty()
+    replStatus = IntegerProperty()
+    statusString = StringProperty()
+    dataId = LongProperty()
+    collId = LongProperty()
+    dataMapId = IntegerProperty()
+    dataComments = StringProperty()
+    dataMode = StringProperty()
+    dataExpiry = StringProperty()
+    dataCreate = StringProperty()
+    dataModify = StringProperty()
+    dataAccess = StringProperty()
+    dataAccessInx = IntegerProperty()
+    writeFlag = IntegerProperty()
+    destRescName = StringProperty()
+    backupRescName = StringProperty()
+    subPath = StringProperty()
+    specColl = IntegerProperty()
+    regUid = IntegerProperty()
+    otherFlags = IntegerProperty()
+    KeyValPair_PI = SubmessageProperty(StringStringMap)
+    in_pdmo = StringProperty()
+    next = IntegerProperty()
+    rescId = LongProperty()
+
+class ModDataObjMeta(Message):
+    _name = "ModDataObjMeta_PI"
+    dataObjInfo = SubmessageProperty(DataObjInfo)
+    regParam = SubmessageProperty(StringStringMap)
 
 #define RErrMsg_PI "int status; str msg[ERR_MSG_LEN];"
 

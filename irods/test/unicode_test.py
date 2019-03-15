@@ -5,7 +5,6 @@ import os
 import sys
 import unittest
 from irods.models import Collection, DataObject
-import irods.test.config as config
 import xml.etree.ElementTree as ET
 import logging
 import irods.test.helpers as helpers
@@ -53,12 +52,10 @@ def parse_xml_file(path):
 
 
 class TestUnicodeNames(unittest.TestCase):
-    # test data
-    coll_path = '/{0}/home/{1}/test_dir'.format(
-        config.IRODS_SERVER_ZONE, config.IRODS_USER_USERNAME)
 
     def setUp(self):
-        self.sess = helpers.make_session_from_config()
+        self.sess = helpers.make_session()
+        self.coll_path = '/{}/home/{}/test_dir'.format(self.sess.zone, self.sess.username)
 
         # make list of unicode filenames, from file
         self.names = parse_xml_file(UNICODE_TEST_FILE)
@@ -78,7 +75,7 @@ class TestUnicodeNames(unittest.TestCase):
         query = self.sess.query(DataObject.name, Collection.name).filter(
             Collection.name == self.coll_path)
 
-        for result in query.get_results():
+        for result in query:
             # check that we got back one of our original names
             assert result[DataObject.name] in self.names
 

@@ -4,17 +4,29 @@ import logging
 import struct
 import hashlib
 import six
+import os
+import ssl
 
 
 from irods.message import (
-    iRODSMessage, StartupPack, AuthResponse, AuthChallenge,
+    iRODSMessage, StartupPack, AuthResponse, AuthChallenge, AuthPluginOut,
     OpenedDataObjRequest, FileSeekResponse, StringStringMap, VersionResponse,
-    GSIAuthMessage, Error)
+    PluginAuthMessage, ClientServerNegotiation, Error)
 from irods.exception import get_exception_by_code, NetworkException
 from irods import (
     MAX_PASSWORD_LENGTH, RESPONSE_LEN,
-    AUTH_SCHEME_KEY, GSI_AUTH_PLUGIN, GSI_AUTH_SCHEME, GSI_OID
-)
+    AUTH_SCHEME_KEY, AUTH_USER_KEY, AUTH_PWD_KEY, AUTH_TTL_KEY,
+    NATIVE_AUTH_SCHEME,
+    GSI_AUTH_PLUGIN, GSI_AUTH_SCHEME, GSI_OID,
+    PAM_AUTH_SCHEME)
+from irods.client_server_negotiation import (
+    perform_negotiation,
+    validate_policy,
+    REQUEST_NEGOTIATION,
+    REQUIRE_TCP,
+    FAILURE,
+    USE_SSL,
+    CS_NEG_RESULT_KW)
 from irods.api_number import api_number
 
 logger = logging.getLogger(__name__)
@@ -32,17 +44,19 @@ class Connection(object):
 
         scheme = self.account.authentication_scheme
 
-        if scheme == 'native':
+        if scheme == NATIVE_AUTH_SCHEME:
             self._login_native()
-        elif scheme == 'gsi':
+        elif scheme == GSI_AUTH_SCHEME:
             self.client_ctx = None
             self._login_gsi()
+        elif scheme == PAM_AUTH_SCHEME:
+            self._login_pam()
         else:
             raise ValueError("Unknown authentication scheme %s" % scheme)
 
     @property
     def server_version(self):
-        return self._server_version.relVersion
+        return tuple(int(x) for x in self._server_version.relVersion.replace('rods', '').split('.'))
 
     @property
     def client_signature(self):
@@ -82,6 +96,23 @@ class Connection(object):
             raise get_exception_by_code(msg.int_info, err_msg)
         return msg
 
+    def recv_into(self, buffer):
+        try:
+            msg = iRODSMessage.recv_into(self.socket, buffer)
+        except socket.error:
+            logger.error("Could not receive server response")
+            self.release(True)
+            raise NetworkException("Could not receive server response")
+
+        if msg.int_info < 0:
+            try:
+                err_msg = iRODSMessage(msg=msg.error).get_main_message(Error).RErrMsg_PI[0].msg
+            except TypeError:
+                raise get_exception_by_code(msg.int_info)
+            raise get_exception_by_code(msg.int_info, err_msg)
+
+        return msg
+
     def __enter__(self):
         return self
 
@@ -99,6 +130,57 @@ class Connection(object):
             self.release(True)
             raise NetworkException("Unable to send API reply")
 
+    def requires_cs_negotiation(self):
+        try:
+            if self.account.client_server_negotiation == REQUEST_NEGOTIATION:
+                return True
+        except AttributeError:
+            return False
+        return False
+
+    def ssl_startup(self):
+        # Get encryption settings from client environment
+        host = self.account.host
+        algo = self.account.encryption_algorithm
+        key_size = self.account.encryption_key_size
+        hash_rounds = self.account.encryption_num_hash_rounds
+        salt_size = self.account.encryption_salt_size
+
+        # Get or create SSL context
+        try:
+            context = self.account.ssl_context
+        except AttributeError:
+            CA_file = getattr(self.account, 'ssl_ca_certificate_file', None)
+            context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=CA_file)
+
+        # Wrap socket with context
+        wrapped_socket = context.wrap_socket(self.socket, server_hostname=host)
+
+        # Initial SSL handshake
+        wrapped_socket.do_handshake()
+
+        # Generate key (shared secret)
+        key = os.urandom(self.account.encryption_key_size)
+
+        # Send header-only message with client side encryption settings
+        packed_header = iRODSMessage.pack_header(algo,
+                                                 key_size,
+                                                 salt_size,
+                                                 hash_rounds,
+                                                 0)
+        wrapped_socket.sendall(packed_header)
+
+        # Send shared secret
+        packed_header = iRODSMessage.pack_header('SHARED_SECRET',
+                                                 key_size,
+                                                 0,
+                                                 0,
+                                                 0)
+        wrapped_socket.sendall(packed_header + key)
+
+        # Use SSL socket from now on
+        self.socket = wrapped_socket
+
     def _connect(self):
         address = (self.account.host, self.account.port)
         timeout = self.pool.connection_timeout
@@ -108,8 +190,7 @@ class Connection(object):
         except socket.error:
             raise NetworkException(
                 "Could not connect to specified host and port: " +
-                "{host}:{port}".format(
-                    host=self.account.host, port=self.account.port))
+                "{}:{}".format(*address))
 
         self.socket = s
         main_message = StartupPack(
@@ -117,16 +198,68 @@ class Connection(object):
             (self.account.client_user, self.account.client_zone)
         )
 
+        # No client-server negotiation
+        if not self.requires_cs_negotiation():
+
+            # Send startup pack without negotiation request
+            msg = iRODSMessage(msg_type='RODS_CONNECT', msg=main_message)
+            self.send(msg)
+
+            # Server responds with version
+            version_msg = self.recv()
+
+            # Done
+            return version_msg.get_main_message(VersionResponse)
+
+        # Get client negotiation policy
+        client_policy = getattr(self.account, 'client_server_policy', REQUIRE_TCP)
+
+        # Sanity check
+        validate_policy(client_policy)
+
+        # Send startup pack with negotiation request
+        main_message.option = '{};{}'.format(main_message.option, REQUEST_NEGOTIATION)
         msg = iRODSMessage(msg_type='RODS_CONNECT', msg=main_message)
         self.send(msg)
 
-        # server responds with version
+        # Server responds with its own negotiation policy
+        cs_neg_msg = self.recv()
+        response = cs_neg_msg.get_main_message(ClientServerNegotiation)
+        server_policy = response.result
+
+        # Perform the negotiation
+        neg_result, status = perform_negotiation(client_policy=client_policy,
+                                                 server_policy=server_policy)
+
+        # Send negotiation result to server
+        client_neg_response = ClientServerNegotiation(
+            status=status,
+            result='{}={};'.format(CS_NEG_RESULT_KW, neg_result)
+        )
+        msg = iRODSMessage(msg_type='RODS_CS_NEG_T', msg=client_neg_response)
+        self.send(msg)
+
+        # If negotiation failed we're done
+        if neg_result == FAILURE:
+            self.disconnect()
+            raise NetworkException("Client-Server negotiation failure: {},{}".format(client_policy, server_policy))
+
+        # Server responds with version
         version_msg = self.recv()
+
+        if neg_result == USE_SSL:
+            self.ssl_startup()
+
         return version_msg.get_main_message(VersionResponse)
 
     def disconnect(self):
         disconnect_msg = iRODSMessage(msg_type='RODS_DISCONNECT')
         self.send(disconnect_msg)
+        try:
+            # SSL shutdown handshake
+            self.socket = self.socket.unwrap()
+        except AttributeError:
+            pass
         self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
         self.socket = None
@@ -205,9 +338,10 @@ class Connection(object):
     def gsi_client_auth_request(self):
 
         # Request for authentication with GSI on current user
-        message_body = GSIAuthMessage(
+
+        message_body = PluginAuthMessage(
             auth_scheme_=GSI_AUTH_PLUGIN,
-            context_='a_user=%s' % self.account.client_user
+            context_='%s=%s' % (AUTH_USER_KEY, self.account.client_user)
         )
         # GSI = 1201
 # https://github.com/irods/irods/blob/master/lib/api/include/apiNumber.h#L158
@@ -252,7 +386,44 @@ class Connection(object):
 
         logger.info("GSI authorization validated")
 
-    def read_file(self, desc, size):
+    def _login_pam(self):
+
+        ctx_user = '%s=%s' % (AUTH_USER_KEY, self.account.client_user)
+        ctx_pwd = '%s=%s' % (AUTH_PWD_KEY, self.account.password)
+        ctx_ttl = '%s=%s' % (AUTH_TTL_KEY, "60")
+
+        ctx = ";".join([ctx_user, ctx_pwd, ctx_ttl])
+
+        message_body = PluginAuthMessage(
+            auth_scheme_=PAM_AUTH_SCHEME,
+            context_=ctx
+        )
+
+        auth_req = iRODSMessage(
+            msg_type='RODS_API_REQ',
+            msg=message_body,
+            # int_info=725
+            int_info=1201
+        )
+
+        self.send(auth_req)
+        # Getting the new password
+        output_message = self.recv()
+
+        auth_out = output_message.get_main_message(AuthPluginOut)
+
+        self.disconnect()
+        self._connect()
+        self._login_native(password=auth_out.result_)
+
+        logger.info("PAM authorization validated")
+
+    def read_file(self, desc, size=-1, buffer=None):
+        if size < 0:
+            size = len(buffer)
+        elif buffer is not None:
+            size = min(size, len(buffer))
+
         message_body = OpenedDataObjRequest(
             l1descInx=desc,
             len=size,
@@ -267,10 +438,18 @@ class Connection(object):
 
         logger.debug(desc)
         self.send(message)
-        response = self.recv()
+        if buffer is None:
+            response = self.recv()
+        else:
+            response = self.recv_into(buffer)
+
         return response.bs
 
-    def _login_native(self):
+    def _login_native(self, password=None):
+
+        # Default case, PAM login will send a new password
+        if password is None:
+            password = self.account.password
 
         # authenticate
         auth_req = iRODSMessage(msg_type='RODS_API_REQ', int_info=703)
@@ -292,11 +471,11 @@ class Connection(object):
         if six.PY3:
             challenge = challenge.strip()
             padded_pwd = struct.pack(
-                "%ds" % MAX_PASSWORD_LENGTH, self.account.password.encode(
+                "%ds" % MAX_PASSWORD_LENGTH, password.encode(
                     'utf-8').strip())
         else:
             padded_pwd = struct.pack(
-                "%ds" % MAX_PASSWORD_LENGTH, self.account.password)
+                "%ds" % MAX_PASSWORD_LENGTH, password)
 
         m = hashlib.md5()
         m.update(challenge)
@@ -351,7 +530,7 @@ class Connection(object):
         offset = response.get_main_message(FileSeekResponse).offset
         return offset
 
-    def close_file(self, desc, options=None):
+    def close_file(self, desc, **options):
         message_body = OpenedDataObjRequest(
             l1descInx=desc,
             len=0,

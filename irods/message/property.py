@@ -3,7 +3,10 @@ from base64 import b64encode, b64decode
 
 from irods.message.ordered import OrderedProperty
 import six
-
+if six.PY3:
+    from html import escape
+else:
+    from cgi import escape
 
 class MessageProperty(OrderedProperty):
 
@@ -58,12 +61,18 @@ class BinaryProperty(MessageProperty):
         self.length = length
         super(BinaryProperty, self).__init__()
 
-    def format(self, value):
-        if six.PY3 and not isinstance(value, bytes):
-            val = b64encode(value.encode('utf-8'))
-        else:
-            val = b64encode(value)
-        return val
+    if six.PY2:
+        def format(self, value):
+            return b64encode(value)
+
+    else:
+        # Python 3
+        def format(self, value):
+            if isinstance(value, bytes):
+                return b64encode(value)
+            else:
+                return b64encode(value.encode())
+
 
     def parse(self, value):
         val = b64decode(value)
@@ -76,10 +85,28 @@ class StringProperty(MessageProperty):
         self.length = length
         super(StringProperty, self).__init__()
 
-    def format(self, value):
-        if six.PY3 and isinstance(value, bytes):
-            value = value.decode()
-        return value
+    @staticmethod
+    def escape_xml_string(string):
+        return escape(string, quote=False)
+
+    if six.PY2:
+        def format(self, value):
+            if isinstance(value, str) or isinstance(value, unicode):
+                return self.escape_xml_string(value)
+
+            return self.escape_xml_string(str(value))
+
+    else:
+        # Python 3
+        def format(self, value):
+            if isinstance(value, str):
+                return self.escape_xml_string(value)
+
+            if isinstance(value, bytes):
+                return self.escape_xml_string(value.decode())
+
+            return self.escape_xml_string(str(value))
+
 
     def parse(self, value):
         return value

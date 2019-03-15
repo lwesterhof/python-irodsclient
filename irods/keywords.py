@@ -1,7 +1,7 @@
 '''From rodsKeyWdDef.hpp
 '''
 
-ALL_KW = "all"        # operation done on all replica #
+ALL_KW = "all"        # operation done on all replicas #
 COPIES_KW = "copies"    # the number of copies #
 EXEC_LOCALLY_KW = "execLocally"    # execute locally #
 FORCE_FLAG_KW = "forceFlag"    # force update #
@@ -13,7 +13,7 @@ OBJ_PATH_KW = "objPath"   # logical path of the object #
 RESC_NAME_KW = "rescName"   # resource name #
 DEST_RESC_NAME_KW = "destRescName"   # destination resource name #
 DEF_RESC_NAME_KW = "defRescName"   # default resource name #
-BACKUP_RESC_NAME_KW = "backupRescName"  # destination resource name #
+BACKUP_RESC_NAME_KW = "backupRescName"  # backup resource name #
 DATA_TYPE_KW = "dataType"   # data type #
 DATA_SIZE_KW = "dataSize"
 CHKSUM_KW = "chksum"
