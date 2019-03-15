@@ -113,6 +113,7 @@ class String(ColumnType):
 
     @staticmethod
     def to_irods(data):
+        data = unicode(data, "utf-8", "replace")
         return u"'{}'".format(data)
 
 
